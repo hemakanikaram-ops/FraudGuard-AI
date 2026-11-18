@@ -1,0 +1,344 @@
+
+from fastapi import FastAPI, HTTPException, Depends, Query
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from pathlib import Path
+import pandas as pd
+import joblib
+
+from backend.database import engine, get_db, Base
+from backend.models import PredictionRecord
+
+
+# ==================================================
+# 1. INITIALIZE FASTAPI
+# ==================================================
+
+app = FastAPI(
+    title="FraudGuard AI",
+    description="AI-Powered Credit Card Fraud Detection API",
+    version="1.0"
+)
+
+
+# ==================================================
+# 2. PROJECT PATHS
+# ==================================================
+
+PROJECT_PATH = Path(__file__).resolve().parents[1]
+
+MODEL_PATH = PROJECT_PATH / "models"
+
+
+# ==================================================
+# 3. LOAD TRAINED MODEL AND SCALER
+# ==================================================
+
+try:
+
+    model = joblib.load(
+        MODEL_PATH / "fraud_detection_model.pkl"
+    )
+
+    scaler = joblib.load(
+        MODEL_PATH / "scaler.pkl"
+    )
+
+    print("ML model loaded successfully!")
+    print("Scaler loaded successfully!")
+
+except FileNotFoundError as error:
+
+    raise RuntimeError(
+        f"Model or scaler file not found: {error}"
+    )
+
+
+# ==================================================
+# 4. CREATE DATABASE TABLES
+# ==================================================
+
+Base.metadata.create_all(bind=engine)
+
+print("Database initialized successfully!")
+
+
+# ==================================================
+# 5. TRANSACTION INPUT MODEL
+# ==================================================
+
+class Transaction(BaseModel):
+
+    Time: float
+
+    V1: float
+    V2: float
+    V3: float
+    V4: float
+    V5: float
+    V6: float
+    V7: float
+    V8: float
+    V9: float
+    V10: float
+    V11: float
+    V12: float
+    V13: float
+    V14: float
+    V15: float
+    V16: float
+    V17: float
+    V18: float
+    V19: float
+    V20: float
+    V21: float
+    V22: float
+    V23: float
+    V24: float
+    V25: float
+    V26: float
+    V27: float
+    V28: float
+
+    Amount: float
+
+
+# ==================================================
+# 6. HOME ENDPOINT
+# ==================================================
+
+@app.get("/")
+def home():
+
+    return {
+        "message": "Welcome to FraudGuard AI API",
+        "status": "Running"
+    }
+
+
+# ==================================================
+# 7. HEALTH CHECK ENDPOINT
+# ==================================================
+
+@app.get("/health")
+def health_check():
+
+    return {
+        "status": "Healthy",
+        "model_loaded": model is not None,
+        "database": "Configured"
+    }
+
+
+# ==================================================
+# 8. FRAUD PREDICTION ENDPOINT
+# ==================================================
+
+@app.post("/predict")
+def predict_fraud(
+    transaction: Transaction,
+    db: Session = Depends(get_db)
+):
+
+    try:
+
+        # Convert transaction into DataFrame
+        transaction_data = pd.DataFrame(
+            [transaction.model_dump()]
+        )
+
+        # Maintain original training feature order
+        feature_columns = [
+            "Time",
+            *[f"V{i}" for i in range(1, 29)],
+            "Amount"
+        ]
+
+        transaction_data = transaction_data[
+            feature_columns
+        ]
+
+        # Scale Time and Amount
+        columns_to_scale = ["Time", "Amount"]
+
+        transaction_data[columns_to_scale] = (
+            scaler.transform(
+                transaction_data[columns_to_scale]
+            )
+        )
+
+        # Calculate fraud probability
+        probability = float(
+            model.predict_proba(
+                transaction_data
+            )[0][1]
+        )
+
+        # Predict transaction class
+        prediction = int(
+            model.predict(transaction_data)[0]
+        )
+
+        # Generate result
+        result = (
+            "Potential Fraud"
+            if prediction == 1
+            else "Genuine Transaction"
+        )
+
+        # Save prediction in database
+        record = PredictionRecord(
+
+            transaction_time=transaction.Time,
+
+            amount=transaction.Amount,
+
+            fraud_probability=probability,
+
+            prediction=prediction,
+
+            result=result,
+
+            transaction_features=transaction.model_dump()
+        )
+
+        db.add(record)
+
+        db.commit()
+
+        db.refresh(record)
+
+        return {
+
+            "transaction_id": record.id,
+
+            "fraud_probability": round(
+                probability, 4
+            ),
+
+            "prediction": prediction,
+
+            "result": result,
+
+            "message": "Prediction saved successfully"
+
+        }
+
+    except Exception as error:
+
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(error)
+        )
+
+
+# ==================================================
+# 9. GET ALL TRANSACTION HISTORY
+# ==================================================
+
+@app.get("/transactions")
+def get_transaction_history(
+
+    db: Session = Depends(get_db),
+
+    limit: int = Query(default=100, ge=1, le=1000),
+
+    offset: int = Query(default=0, ge=0)
+
+):
+
+    try:
+
+        records = (
+            db.query(PredictionRecord)
+            .order_by(PredictionRecord.id.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+        return [
+
+            {
+                "transaction_id": record.id,
+
+                "transaction_time": record.transaction_time,
+
+                "amount": record.amount,
+
+                "fraud_probability": record.fraud_probability,
+
+                "prediction": record.prediction,
+
+                "result": record.result,
+
+                "created_at": record.created_at
+
+            }
+
+            for record in records
+
+        ]
+
+    except Exception as error:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(error)
+        )
+
+
+# ==================================================
+# 10. GET TRANSACTION BY ID
+# ==================================================
+
+@app.get("/transactions/{transaction_id}")
+def get_transaction(
+
+    transaction_id: int,
+
+    db: Session = Depends(get_db)
+
+):
+
+    record = (
+
+        db.query(PredictionRecord)
+
+        .filter(
+            PredictionRecord.id == transaction_id
+        )
+
+        .first()
+
+    )
+
+    if record is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Transaction not found"
+        )
+
+    return {
+
+        "transaction_id": record.id,
+
+        "transaction_time": record.transaction_time,
+
+        "amount": record.amount,
+
+        "fraud_probability": record.fraud_probability,
+
+        "prediction": record.prediction,
+
+        "result": record.result,
+
+        "created_at": record.created_at,
+
+        "transaction_features": record.transaction_features
+
+    }
